@@ -2,12 +2,13 @@ import math
 import numpy as np
 import torch
 import torchaudio.transforms as T
+from util import eval_noise_std
 ############ For Environment ###############
 speed_of_light = 343
 
 class LinearArray():
 
-    def __init__(self,M,L,d,fs,n_fft = 512,win_length = 512,hop_length = 128,snr = math.inf):
+    def __init__(self,M,L,d,fs,n_fft = 512,win_length = 512,hop_length = 256,snr = math.inf):
         # Initializes the geometry
         self.c = speed_of_light
         self.M = M # n of sensors
@@ -19,7 +20,7 @@ class LinearArray():
         self.Nf = n_fft//2 + 1
         self.N = (L-win_length)//(hop_length) + 1
 
-        self.stft = T.Spectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length)
+        self.stft = T.Spectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length,power=None)
         self.istft = T.InverseSpectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length)
 
         self.taxis = torch.linspace(0, L/fs , steps=self.N)
@@ -32,6 +33,9 @@ class LinearArray():
         # Noise stat
         self.snr = snr
 
+    def __len__(self):
+        return len(self.signals)
+
     def add_signal(self,s,theta):
         # Expects s of dimension (n_channel,N)
         assert s.size(-1) >= self.N
@@ -42,14 +46,6 @@ class LinearArray():
         # Append to the list
         self.thetas.append(theta)
         self.signals.append(spectrogram)
-
-    def remove_signal(self,theta):
-
-        assert theta in self.thetas
-
-        idx = self.thetas.index("theta")
-        _ = self.thetas.pop(idx)
-        _ = self.signals.pop(idx)
 
     def eval_svec(self,theta):
         tau = -(self.pos.view(-1,1) * torch.sin(torch.deg2rad(torch.tensor([theta]))))/self.c # (M,1)
@@ -91,16 +87,12 @@ class LinearArray():
 
         return abs(activation.squeeze())**2 # Returns power in (Nthetas,Nf)
 
-    def eval_noise_std(self,Ps):
-        
-        return Ps * 10**(-self.snr/20)
-
-    def read_sensor(self,theta):
+    def read_sensor(self):
         
         # Reading on the sensor
         outputs = []
 
-        for spectrogram in self.signals:
+        for spectrogram,theta in zip(self.signals,self.thetas):
             # evaluate svec (M,Ntheta,Nf)
             s_vec = self.eval_svec(theta)
             # Expand dim using product s_vec : (M,Nf) and spectrogram : (Nf,N)
@@ -109,11 +101,9 @@ class LinearArray():
             # Bring back to time domain
             single_sensor_output = self.istft(stft_single_sensor_output)
             # Apply the measurement noise based on the SNR
-            Ps = abs(single_sensor_output).sum().item()**2/(self.M * self.N)
-            noise_sig = self.eval_noise_std(Ps)
+            #Ps = abs(single_sensor_output).sum().item()**2/(self.M * self.N)
+            #noise_sig = eval_noise_std(Ps)
             # Generate sensor noise and add
-            outputs.append(single_sensor_output + noise_sig*torch.randn_like(single_sensor_output))
+            outputs.append(single_sensor_output )#+ noise_sig*torch.randn_like(single_sensor_output))
         output = sum(outputs)
         return output
-
-
