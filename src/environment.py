@@ -13,97 +13,91 @@ class LinearArray():
         self.c = speed_of_light
         self.M = M # n of sensors
         self.d = d # Spacing bw each
-        self.pos = torch.Tensor([i*d for i in range(M)])
+        self.pos = torch.Tensor([i*d for i in range(M)]) # (M,)
 
         # Initialize temporal freq aspect
         self.fs = fs
         self.Nf = n_fft//2 + 1
         self.N = (L-win_length)//(hop_length) + 1
 
-        self.stft = T.Spectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length,power=None)
-        self.istft = T.InverseSpectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length)
+        # STFT,ISTFT Params
+        self.n_fft = n_fft
+        self.win_length = win_length
+        self.window = torch.hann_window(self.win_length)
+        self.hop_length = hop_length
 
         self.taxis = torch.linspace(0, L/fs , steps=self.N)
         self.faxis = torch.linspace(0, fs/2, steps=self.Nf)
 
         # Initialize signal collection so far
         self.thetas = []
-        self.signals = []
+        self.spectrograms = []
 
         # Noise stat
         self.snr = snr
 
     def __len__(self):
-        return len(self.signals)
+        return len(self.spectrograms)
 
     def add_signal(self,s,theta):
-        # Expects s of dimension (n_channel,N)
-        assert s.size(-1) >= self.N
-
+        # Expects s of dimension (N)
         # Forward spectrogram
-        spectrogram = self.stft(s.squeeze())
+        spectrogram = torch.stft(s,self.n_fft,self.hop_length,self.win_length,window = self.window,return_complex=True)
         
         # Append to the list
         self.thetas.append(theta)
-        self.signals.append(spectrogram)
+        self.spectrograms.append(spectrogram)
+
+        print(s.shape,spectrogram.shape)
 
     def eval_svec(self,theta):
-        tau = -(self.pos.view(-1,1) * torch.sin(torch.deg2rad(torch.tensor([theta]))))/self.c # (M,1)
+        theta_rad = torch.deg2rad(torch.tensor([theta]))
+        tau = -(self.pos * torch.sin(theta_rad))/self.c # (M,)
+        # tau (M) and faxis (Nf)
 
-        # tau (M,1) and faxis (Nf)
-        # (M,1) and (1,Nf)
-
-        phi = 2*np.pi*tau * self.faxis.view(1,-1)
+        faxis = torch.linspace(0,self.fs//2,self.Nf)
+        phi = 2*np.pi * torch.einsum('M,F -> MF',tau,faxis)             
         s_vec = torch.exp(1j*phi) # (M,Nf)
 
         return s_vec # (M,Nf)
 
     def eval_svec_multiangle(self,thetas):
-        # I want to expand this to multiple thetas (N_thetas)
-        # Expects theta of int
+        # I want to expand this to multiple thetas (list of length thetas)
+        # Radian Angles
+        thetas = torch.sin(torch.deg2rad(torch.tensor(thetas))) # Size (T)
+        # Freq Axis
+        faxis = torch.linspace(0,self.fs//2,self.Nf) # Size (F)
 
-        tau = -(self.pos.view(-1,1) @ torch.sin(torch.deg2rad(thetas.view(1,-1))))/self.c # (M,Ntheta)
-
-        # tau (M,Ntheta) and faxis (Nf)
-        # (M,Ntheta,1) and (1,1,Nf)
-
-        phi = 2*np.pi*tau.unsqueeze(-1) * self.faxis.view(1,1,-1)
-        s_vec = torch.exp(1j*phi) # (M,Ntheta,Nf)
-
-        return s_vec # (M,Ntheta,Nf)
-    
-    def eval_directivity(self,thetas,theta_target):
-
-        # Evaluatate steering vector (opposite) from all thetas (M,Nthetas,Nf)
-        s_vecs_multi_angle = self.eval_svec_multiangle(thetas)
-        print('Multiangle:',s_vecs_multi_angle.shape)
-
-        # Evaluate the steering vector from the target angle (M,Nf)
-        s_vec = self.eval_svec(theta_target) 
-        print('Singleangle:',s_vec.shape)
-
-        # Conjugate the first collection of the vectors and apply dot product and eval power returns (M,Nthetas)
-        activation = s_vecs_multi_angle.conj().permute(dims=(1,2,0)).unsqueeze(-1).transpose(-1,-2) @ s_vec.view(s_vec.shape[0],1,s_vec.shape[1]).permute(dims=(1,2,0)).unsqueeze(-1)
-
-        return abs(activation.squeeze())**2 # Returns power in (Nthetas,Nf)
-
-    def read_sensor(self):
+        # self.pos has size (M) - We want T,M,F
+        phi = - 2*np.pi/self.c * torch.einsum('T,M,F -> TMF', thetas,self.pos,faxis)
         
-        # Reading on the sensor
-        outputs = []
+        s_vec = torch.exp(1j*phi)
 
-        for spectrogram,theta in zip(self.signals,self.thetas):
-            # evaluate svec (M,Ntheta,Nf)
-            s_vec = self.eval_svec(theta)
-            # Expand dim using product s_vec : (M,Nf) and spectrogram : (Nf,N)
-            # Need (M,Nf,None) and (None,Nf,N)
-            stft_single_sensor_output = s_vec.view(*s_vec.shape,1) * spectrogram.view(1,*spectrogram.shape)
-            # Bring back to time domain
-            single_sensor_output = self.istft(stft_single_sensor_output)
-            # Apply the measurement noise based on the SNR
-            #Ps = abs(single_sensor_output).sum().item()**2/(self.M * self.N)
-            #noise_sig = eval_noise_std(Ps)
-            # Generate sensor noise and add
-            outputs.append(single_sensor_output )#+ noise_sig*torch.randn_like(single_sensor_output))
-        output = sum(outputs)
-        return output
+        return s_vec # (Ntheta,M,Nf)
+    
+    def read_sensor(self,theta_exclude = None, in_freq = False):
+
+        thetas = self.thetas[:]
+        spectrograms = self.spectrograms[:]
+
+        if theta_exclude is not None:
+            # Remove unwanted theta/signal pair
+            idx = thetas.index(theta_exclude)
+            _ = thetas.pop(idx)
+            _ = spectrograms.pop(idx)
+
+        # Steering vector
+        s_vec_multi = self.eval_svec_multiangle(self.thetas) # (T,M,F)
+
+        # Build a torch tensor for signals (T,F,N) 
+        S  = torch.stack(spectrograms,dim=0)
+
+        
+        # Mul and summation along T and element wise on the F and keeep the rest 
+        sensor_output = torch.einsum('TMF,TFN -> MFN', s_vec_multi,S)
+
+        if not in_freq:
+
+            sensor_output = torch.istft(sensor_output,self.n_fft,self.hop_length,self.win_length,window=self.window,return_complex=False)
+
+        return sensor_output

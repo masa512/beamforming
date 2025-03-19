@@ -18,7 +18,7 @@ def apply_beamformer(X, w, n_fft = 512,win_length = 512,hop_length = 256):
     spectrogram = stft(X) # M,Nf,N
 
     # Apply the weight
-    filtered_spectrogram= 1/M * (w.transpose(-1,-2).unsqueeze(-1) * spectrogram).sum(dim = 0, keepdim = False)
+    filtered_spectrogram= (w.transpose(-1,-2).unsqueeze(-1) * spectrogram).sum(dim = 0, keepdim = False)
     
     # ISTFT
     output_signal = istft(filtered_spectrogram)
@@ -32,7 +32,6 @@ def get_directivity(lin_arr:LinearArray,w:torch.Tensor,n_thetas):
     # Evaluatate steering vector (opposite) from all thetas (M,Nthetas,Nf)-> (Nthetas,Nf,M)
     s_vecs_multi_angle = lin_arr.eval_svec_multiangle(thetas)
     # Apply the weight w on above
-    print(s_vecs_multi_angle.shape, w.shape)
     activation = s_vecs_multi_angle.permute(1,2,0) * w.squeeze(0)
 
     return abs(activation.sum(dim=-1))**2 # Returns power in (Nthetas,Nf)
@@ -41,8 +40,8 @@ def DAS_beamformer(lin_arr:LinearArray,theta_target):
 
     # Extract the steering vec and conj
     s_vec = lin_arr.eval_svec(theta_target)
-
-    return s_vec.conj().transpose(-1,-2)
+    M = s_vec.shape[-1]
+    return 1/M * s_vec.conj().transpose(-1,-2)
 
 
 def MVDR_beamformer(lin_arr:LinearArray,theta_target):
@@ -51,7 +50,7 @@ def MVDR_beamformer(lin_arr:LinearArray,theta_target):
     s_vec = lin_arr.eval_svec(theta_target).conj() # (M,Nf)
 
     # Evaluate the inverse correlation function of the observation
-    sensor_out = lin_arr.read_sensor()
+    sensor_out = lin_arr.read_sensor(exclude_theta=theta_target)
 
     # The observation must be in dimension (M,N) Take stft
     stft = stft_wrapper()
