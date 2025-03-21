@@ -4,67 +4,111 @@ from util import stft_wrapper, istft_wrapper,covariance_wrapper
 import torch.linalg as linalg
 import torch
 
-def apply_beamformer(X, w, n_fft = 512,win_length = 512,hop_length = 256):
-    # X has shape (M,L)
-    # w has shape (Nf,M)
+#FFT PARAMS
+n_fft = 512
+win_length = 512
+hop_length = 256
 
-    M = X.shape[0] # M
+class DasBeamformer():
 
-    # SFTF and ISTFT
-    stft = T.Spectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length,power=None)
-    istft = T.InverseSpectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length)
+    def __init__(self,lin_arr:LinearArray):
 
-    # Apply STFT on the Sensor signal
-    spectrogram = stft(X) # M,Nf,N
-
-    # Apply the weight
-    filtered_spectrogram= (w.transpose(-1,-2).unsqueeze(-1) * spectrogram).sum(dim = 0, keepdim = False)
+        self.lin_arr = lin_arr
+        self.w = None
+        self.stft = T.Spectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length,power=None)
+        self.istft = T.InverseSpectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length)
     
-    # ISTFT
-    output_signal = istft(filtered_spectrogram)
-    return output_signal
+    def eval_weight(self,theta):
 
+        # Bring steering vectors (M,F)
+        a = self.lin_arr.eval_svec(theta)
+        M = a.shape[0]
 
-def get_directivity(lin_arr:LinearArray,w:torch.Tensor,n_thetas):
-    # w has shape (Nf,M) -> (1,Nf,M)
-    # Thetas
-    thetas = torch.linspace(0,180,n_thetas)
-    # Evaluatate steering vector (opposite) from all thetas (M,Nthetas,Nf)-> (Nthetas,Nf,M)
-    s_vecs_multi_angle = lin_arr.eval_svec_multiangle(thetas)
-    # Apply the weight w on above
-    activation = s_vecs_multi_angle.permute(1,2,0) * w.squeeze(0)
+        # Take conjugate transpose
+        w = a.conj()
+        self.w = w/M
+        return self.w
 
-    return abs(activation.sum(dim=-1))**2 # Returns power in (Nthetas,Nf)
+    def apply_beamformer(self,theta):
 
-def DAS_beamformer(lin_arr:LinearArray,theta_target):
+        if self.w is None:
+            self.w = self.eval_weight(theta) # M,F
 
-    # Extract the steering vec and conj
-    s_vec = lin_arr.eval_svec(theta_target)
-    M = s_vec.shape[-1]
-    return 1/M * s_vec.conj().transpose(-1,-2)
+        X = self.lin_arr.read_sensor(in_freq=True) # Returns M,F,N
+        Y = torch.einsum('MF,MFN -> FN',self.w,X)
 
-
-def MVDR_beamformer(lin_arr:LinearArray,theta_target):
-
-    # Extract the steering vec and conj
-    s_vec = lin_arr.eval_svec(theta_target).conj() # (M,Nf)
-
-    # Evaluate the inverse correlation function of the observation
-    sensor_out = lin_arr.read_sensor(exclude_theta=theta_target)
-
-    # The observation must be in dimension (M,N) Take stft
-    stft = stft_wrapper()
-    sensor_spectrogram = stft(sensor_out)
-
-    # Evaluate covariance only along the last axis (Sensor spectrogram has dim (M,Nf,N)
-    R = covariance_wrapper(sensor_spectrogram.permute((1,2,0))) #(Nf,M,M)
-
-    # MVDR beamformer is defined as... (R^-1 a)/(a.H R^-1 a)
-    Rinv = linalg.pinv(R) # (Nf,M,M)
-    a = s_vec.transpose(-1,-2).unsqueeze(-1) # (Nf,M,1)
-    ah = a.transpose(-1,-2).conj() # (Nf,1,M)
-    w = (Rinv @ a)/(ah @ Rinv @ a)
-
-    return w.squeeze() # (Nf,M)
+        return self.istft(Y) # Returns L
     
+    def beam_pattern(self,target_theta,Ntheta):
+
+        if self.w is None:
+            self.w = self.eval_weight(target_theta) # M,F
+
+        thetas = torch.linspace(0,180,Ntheta).tolist()
+
+        # Get steering vectors
+        s_vec_multi = self.lin_arr.eval_svec_multiangle(thetas) # T,M,F
+
+        # Evaluate Dot product over M and leave as (T,F)
+        bp = torch.log(abs(torch.einsum('MF,TMF->TF',self.w,s_vec_multi)))
+
+        return bp.transpose(-1,-2)
+        
+
+
+class MvdrBeamformer():
+
+    def __init__(self,lin_arr:LinearArray):
+
+        self.lin_arr = lin_arr
+        self.w = None
+        self.stft = T.Spectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length,power=None)
+        self.istft = T.InverseSpectrogram(n_fft=n_fft,win_length=win_length,hop_length=hop_length)
     
+    def eval_weight(self,theta):
+
+        # Bring steering vector (M,F)
+        a = self.lin_arr.eval_svec(theta).conj().transpose(-1,-2) # Steering vector of shape F,M where F is freq bin and M if sensor index
+        
+        # Spectrogram observation of interference signal (excluding source of interest)
+        X = self.lin_arr.read_sensor(theta_exclude=theta,in_freq=True) # of dimension M,F,N where N is time index
+
+        # Evaluate correlation (Compress in N, Expand in M)
+        N = X.shape[-1]
+        # Rearrange X of MFN to FMN and do X @ X.T
+        X = X.transpose(0,1)
+        R = 1/N * X @ X.conj().transpose(-1,-2) # Correlation of the interference
+        Rinv = R.pinverse() # F,M,M
+
+        # Evaluate filter (Num: Compress in one of the M)
+        # (Den: )
+        num = torch.einsum('FM,FMM->FM',a,Rinv)
+        den = torch.einsum('FM,FMM,MF->F',a,Rinv,a.conj().transpose(-1,-2)).view(-1,1)
+
+        self.w = (num/den).squeeze()
+        return self.w
+
+    def apply_beamformer(self,theta):
+
+        if self.w is None:
+            self.w = self.eval_weight(theta) # M,F
+
+        X = self.lin_arr.read_sensor(in_freq=True) # Returns M,F,N
+        Y = torch.einsum('MF,MFN -> FN',self.w,X)
+
+        return self.istft(Y) # Returns L
+    
+    def beam_pattern(self,target_theta,Ntheta):
+
+        if self.w is None:
+            self.w = self.eval_weight(target_theta) # M,F
+
+        thetas = torch.linspace(0,180,Ntheta).tolist()
+
+        # Get steering vectors
+        s_vec_multi = self.lin_arr.eval_svec_multiangle(thetas) # T,M,F
+
+        # Evaluate Dot product over M and leave as (T,F)
+        bp = torch.log(abs(torch.einsum('MF,TMF->TF',self.w.transpose(-1,-2),s_vec_multi)))
+
+        return bp.transpose(-1,-2)

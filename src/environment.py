@@ -13,7 +13,8 @@ class LinearArray():
         self.c = speed_of_light
         self.M = M # n of sensors
         self.d = d # Spacing bw each
-        self.pos = torch.Tensor([i*d for i in range(M)]) # (M,)
+        self.pos = torch.Tensor([i*d for i in range(M)])
+        self.pos = self.pos - self.pos[len(self.pos)//2] # (M,)
 
         # Initialize temporal freq aspect
         self.fs = fs
@@ -87,7 +88,7 @@ class LinearArray():
             _ = spectrograms.pop(idx)
 
         # Steering vector
-        s_vec_multi = self.eval_svec_multiangle(self.thetas) # (T,M,F)
+        s_vec_multi = self.eval_svec_multiangle(thetas) # (T,M,F)
 
         # Build a torch tensor for signals (T,F,N) 
         S  = torch.stack(spectrograms,dim=0)
