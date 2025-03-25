@@ -53,7 +53,7 @@ class LinearArray():
 
     def eval_svec(self,theta):
         theta_rad = torch.deg2rad(torch.tensor([theta]))
-        tau = -(self.pos * torch.sin(theta_rad))/self.c # (M,)
+        tau = (self.pos * torch.sin(theta_rad))/self.c # (M,)
         # tau (M) and faxis (Nf)
 
         faxis = torch.linspace(0,self.fs//2,self.Nf)
@@ -65,13 +65,12 @@ class LinearArray():
     def eval_svec_multiangle(self,thetas):
         # I want to expand this to multiple thetas (list of length thetas)
         # Radian Angles
-        thetas = torch.sin(torch.deg2rad(torch.tensor(thetas))) # Size (T)
+        thetas_rad = torch.deg2rad(torch.tensor(thetas)) # Size (T)
         # Freq Axis
         faxis = torch.linspace(0,self.fs//2,self.Nf) # Size (F)
-
+        tau = torch.einsum('T,M -> TM',torch.sin(thetas_rad),self.pos)/self.c
         # self.pos has size (M) - We want T,M,F
-        phi = - 2*np.pi/self.c * torch.einsum('T,M,F -> TMF', thetas,self.pos,faxis)
-        
+        phi = 2*np.pi * torch.einsum('TM,F -> TMF',tau,faxis)
         s_vec = torch.exp(1j*phi)
 
         return s_vec # (Ntheta,M,Nf)
@@ -87,16 +86,19 @@ class LinearArray():
             _ = thetas.pop(idx)
             _ = spectrograms.pop(idx)
 
+        print(thetas)
+
         # Steering vector
         s_vec_multi = self.eval_svec_multiangle(thetas) # (T,M,F)
 
         # Build a torch tensor for signals (T,F,N) 
         S  = torch.stack(spectrograms,dim=0)
+        print(S.shape,s_vec_multi.shape)
 
         
         # Mul and summation along T and element wise on the F and keeep the rest 
         sensor_output = torch.einsum('TMF,TFN -> MFN', s_vec_multi,S)
-
+        
         if not in_freq:
 
             sensor_output = torch.istft(sensor_output,self.n_fft,self.hop_length,self.win_length,window=self.window,return_complex=False)

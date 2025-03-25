@@ -68,10 +68,11 @@ class MvdrBeamformer():
     def eval_weight(self,theta):
 
         # Bring steering vector (M,F)
-        a = self.lin_arr.eval_svec(theta).conj().transpose(-1,-2) # Steering vector of shape F,M where F is freq bin and M if sensor index
+        a = self.lin_arr.eval_svec(theta).transpose(-1,-2) # Steering vector of shape F,M where F is freq bin and M if sensor index
         
         # Spectrogram observation of interference signal (excluding source of interest)
-        X = self.lin_arr.read_sensor(theta_exclude=theta,in_freq=True) # of dimension M,F,N where N is time index
+        #X = self.lin_arr.read_sensor(theta_exclude=theta,in_freq=True) # of dimension M,F,N where N is time index
+        X = self.lin_arr.read_sensor(in_freq=True)
 
         # Evaluate correlation (Compress in N, Expand in M)
         N = X.shape[-1]
@@ -80,11 +81,15 @@ class MvdrBeamformer():
         R = 1/N * X @ X.conj().transpose(-1,-2) # Correlation of the interference
         Rinv = R.pinverse() # F,M,M
 
+        # Apply diagonal loading to stabilize inversion
+        eps = 1e-3  # Small regularization term
+        R += eps * torch.eye(R.shape[-1], device=R.device)
+
         # Evaluate filter (Num: Compress in one of the M)
         # (Den: )
-        num = torch.einsum('FM,FMM->FM',a,Rinv)
-        den = torch.einsum('FM,FMM,MF->F',a,Rinv,a.conj().transpose(-1,-2)).view(-1,1)
-
+        num = torch.einsum('FM,FMM->FM', a, Rinv)
+        #den = torch.einsum('FM,FMM,MF->F',a,Rinv,a.conj().transpose(-1,-2)).real.view(-1,1)
+        den = torch.einsum('FM,FMM,MF->F', a, Rinv, a.conj().transpose(-1,-2)).real.view(-1,1)
         self.w = (num/den).squeeze()
         return self.w
 
